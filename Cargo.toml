@@ -1,0 +1,13 @@
+[package]
+name = "gotham-cache"
+version = "0.1.0"
+authors = ["njlr <njlr@users.noreply.github.com>"]
+edition = "2018"
+
+[dependencies]
+tokio = "*"
+hyper = "*"
+gotham = "*"
+gotham_derive = "*"
+serde = "*"
+serde_derive = "*"
