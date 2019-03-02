@@ -30,18 +30,18 @@ struct PathExtractor {
     id: String,
 }
 
-struct PutHandler {
+struct CacheHandler {
     lock: Arc<RwLock<HashSet<String>>>,
     base_path: String,
     dir_handler: DirHandler,
 }
 
-impl PutHandler {
-    fn new (base_path: &str) -> PutHandler {
+impl CacheHandler {
+    fn new (base_path: &str) -> CacheHandler {
         let options = FileOptions::new(base_path)
                 .build();
 
-        PutHandler {
+        CacheHandler {
             lock: Arc::new(RwLock::new(HashSet::new())),
             base_path: base_path.to_string(),
             dir_handler: DirHandler::new(options),
@@ -113,8 +113,8 @@ pub fn main() {
 
     println!("Listening for requests at http://{}", addr);
 
-    let ac_handler = Arc::new(PutHandler::new("cache/ac"));
-    let cas_handler = Arc::new(PutHandler::new("cache/cas"));
+    let ac_handler = Arc::new(CacheHandler::new("cache/ac"));
+    let cas_handler = Arc::new(CacheHandler::new("cache/cas"));
 
     gotham::start(
         addr,
@@ -132,7 +132,7 @@ pub fn main() {
                     });
             }
 
-                {
+            {
                 let ac_handler = ac_handler.clone();
 
                 route
