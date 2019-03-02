@@ -300,6 +300,7 @@ dependencies = [
 name = "gotham-cache"
 version = "0.1.0"
 dependencies = [
+ "futures 0.1.25 (registry+https://github.com/rust-lang/crates.io-index)",
  "gotham 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "gotham_derive 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "hyper 0.12.24 (registry+https://github.com/rust-lang/crates.io-index)",

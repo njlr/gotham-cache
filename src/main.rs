@@ -9,12 +9,18 @@ extern crate serde;
 extern crate serde_derive;
 
 use std::io::Write;
+use std::sync::RwLock;
+use std::sync::Arc;
+use std::collections::HashSet;
 
-use hyper::{Body, StatusCode};
+use futures::future::ok;
+
 use tokio::prelude::{Future, Stream};
 
-use gotham::handler::HandlerFuture;
-use gotham::handler::assets::FileOptions;
+use hyper::{Body, StatusCode};
+
+use gotham::handler::{Handler, HandlerFuture};
+use gotham::handler::assets::{DirHandler, FileOptions};
 use gotham::helpers::http::response::create_empty_response;
 use gotham::router::builder::{build_simple_router, DefineSingleRoute, DrawRoutes};
 use gotham::state::{FromState, State};
@@ -24,72 +30,148 @@ struct PathExtractor {
     id: String,
 }
 
-fn ac_put_handler(mut state: State) -> Box<HandlerFuture> {
-    let path = PathExtractor::borrow_from(&state);
-
-    let worker = tokio::fs::File::create("cache/ac".clone().to_owned() + &path.id)
-        .and_then(|mut file| {
-            Body::take_from(&mut state)
-                .map_err(|err| panic!("Body error: {}", err))
-                .for_each(move |chunk| file.write(&chunk).map(|_| ()))
-                .and_then(|_| {
-                    let res = create_empty_response(&state, StatusCode::OK);
-                    Ok((state, res))
-                })
-        })
-        .map_err(|err| panic!("IO error: {:?}", err));
-
-    Box::new(worker)
+struct PutHandler {
+    lock: Arc<RwLock<HashSet<String>>>,
+    base_path: String,
+    dir_handler: DirHandler,
 }
 
-fn cas_put_handler(mut state: State) -> Box<HandlerFuture> {
-    let path = PathExtractor::borrow_from(&state);
+impl PutHandler {
+    fn new (base_path: &str) -> PutHandler {
+        let options = FileOptions::new(base_path)
+                .build();
 
-    let worker = tokio::fs::File::create("cache/cas".clone().to_owned() + &path.id)
-        .and_then(|mut file| {
-            Body::take_from(&mut state)
-                .map_err(|err| panic!("Body error: {}", err))
-                .for_each(move |chunk| file.write(&chunk).map(|_| ()))
-                .and_then(|_| {
-                    let res = create_empty_response(&state, StatusCode::OK);
-                    Ok((state, res))
+        PutHandler {
+            lock: Arc::new(RwLock::new(HashSet::new())),
+            base_path: base_path.to_string(),
+            dir_handler: DirHandler::new(options),
+        }
+    }
+
+    fn handle_get (&self, state: State) -> Box<HandlerFuture> {
+        let path = PathExtractor::borrow_from(&state);
+
+        let f = self.base_path.clone() + "/" + &path.id;
+
+        let is_in_flight = self.lock.read().unwrap().contains(&f);
+
+        if is_in_flight {
+            let res = create_empty_response(&state, StatusCode::NOT_FOUND);
+
+            Box::new(ok((state, res)))
+        } else {
+            self.dir_handler.clone().handle(state)
+        }
+    }
+
+    fn handle_put (&self, mut state: State) -> Box<HandlerFuture> {
+        let path = PathExtractor::borrow_from(&state);
+
+        let f = self.base_path.clone() + "/" + &path.id;
+
+        let is_in_flight = self.lock.read().unwrap().contains(&f);
+
+        if is_in_flight {
+            let res = create_empty_response(&state, StatusCode::OK);
+
+            Box::new(ok((state, res)))
+        } else {
+            self.lock.write().unwrap().insert(f.clone());
+
+            let lock = self.lock.clone();
+            let f_then = f.clone();
+            let f_err = f.clone();
+            let lock_err = self.lock.clone();
+
+            let worker = tokio::fs::File::create(f)
+                .and_then(move |mut file| {
+                    Body::take_from(&mut state)
+                        .map_err(|err| panic!("Body error: {}", err))
+                        .for_each(move |chunk| file.write(&chunk).map(|_| ()))
+                        .and_then(move |_| {
+                            let res = create_empty_response(&state, StatusCode::OK);
+
+                            lock.write().unwrap().remove(&f_then);
+
+                            Ok((state, res))
+                        })
                 })
-        })
-        .map_err(|err| panic!("IO error: {:?}", err));
+                .map_err(move |err| {
+                    lock_err.write().unwrap().remove(&f_err);
 
-    Box::new(worker)
+                    panic!("IO error: {:?}", err)
+                });
+
+            Box::new(worker)
+        }
+    }
 }
 
 pub fn main() {
+
     let addr = "127.0.0.1:8080";
+
     println!("Listening for requests at http://{}", addr);
+
+    let ac_handler = Arc::new(PutHandler::new("cache/ac"));
+    let cas_handler = Arc::new(PutHandler::new("cache/cas"));
+
     gotham::start(
         addr,
         build_simple_router(|route| {
+            {
+                let ac_handler = ac_handler.clone();
 
-            route
-                .get("/ac/*")
-                .to_dir(
-                    FileOptions::new("cache/ac")
-                    .build(),
-                );
+                route
+                    .get("/ac/*")
+                    .to_new_handler(move || {
+                        let ac_handler = ac_handler.clone();
+                        Ok(move |state: State| {
+                            ac_handler.handle_get(state)
+                        })
+                    });
+            }
 
-            route
-                .put("/ac/:id:[a-f0-9]{64}")
-                .with_path_extractor::<PathExtractor>()
-                .to(ac_put_handler);
+                {
+                let ac_handler = ac_handler.clone();
 
-            route
-                .get("/cas/*")
-                .to_dir(
-                    FileOptions::new("cache/cas")
-                    .build(),
-                );
+                route
+                    .put("/ac/:id:[a-f0-9]{64}")
+                    .with_path_extractor::<PathExtractor>()
+                    .to_new_handler(move || {
+                        let ac_handler = ac_handler.clone();
+                        Ok(move |state: State| {
+                            ac_handler.handle_put(state)
+                        })
+                    });
+            }
 
-            route
-                .put("/cas/:id:[a-f0-9]{64}")
-                .with_path_extractor::<PathExtractor>()
-                .to(cas_put_handler);
+            {
+                let cas_handler = cas_handler.clone();
+
+                route
+                    .get("/cas/*")
+                    .to_new_handler(move || {
+                        let cas_handler = cas_handler.clone();
+                        Ok(move |state: State| {
+                            cas_handler.handle_get(state)
+                        })
+                    });
+            }
+
+            {
+                let cas_handler = cas_handler.clone();
+
+                route
+                    .put("/cas/:id:[a-f0-9]{64}")
+                    .with_path_extractor::<PathExtractor>()
+                    .to_new_handler(move || {
+                        let cas_handler = cas_handler.clone();
+                        Ok(move |state: State| {
+                            cas_handler.handle_put(state)
+                        })
+                    });
+            }
         }),
     )
 }
